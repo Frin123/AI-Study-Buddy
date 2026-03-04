@@ -1,0 +1,7 @@
+streamlit
+google-genai
+pillow
+pypdf
+pdf2image
+gTTS
+fpdf2

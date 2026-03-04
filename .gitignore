@@ -1,0 +1,7 @@
+venv/
+.streamlit/secrets.toml
+__pycache__/
+poppler-25.12.0/
+*.pdf
+*.png
+*.jpg
