@@ -5,11 +5,18 @@ from ai_service import AIService
 from file_utils import process_pdf_to_images, generate_study_pdf
 from gtts import gTTS
 from io import BytesIO
+from datetime import datetime
+import random
 
 # Caching
 @st.cache_resource
-def get_ai_service(_client, language): # Add the underscore here!
+def get_ai_service(_client, language):
     return AIService(_client, language=language)
+
+@st.cache_data
+def get_pdf_export_bytes(data):
+    # This calls your existing PDF generation logic
+    return generate_study_pdf(data)
 
 # --- 1. UI CONFIG & CSS ---
 st.set_page_config(page_title="AI Study Buddy 2026", layout="wide")
@@ -41,6 +48,20 @@ if "client" not in st.session_state:
 if "content_to_analyze" not in st.session_state:
     st.session_state.content_to_analyze = None
 
+if "quiz_data" not in st.session_state:
+    st.session_state.quiz_data = None
+if "user_answers" not in st.session_state:
+    st.session_state.user_answers = {}
+
+if "weak_topics" not in st.session_state:
+    st.session_state.weak_topics = []
+if "quiz_submitted" not in st.session_state:
+    st.session_state.quiz_submitted = False
+if "last_score" not in st.session_state:
+    st.session_state.last_score = 0
+if "quiz_history" not in st.session_state:
+    st.session_state.quiz_history = []
+
 # --- 3. SIDEBAR ---
 with st.sidebar:
     st.title("⚙️ Settings")
@@ -67,37 +88,48 @@ with st.sidebar:
 # --- 4. MAIN APP ---
 st.title("🧠 AI Study Buddy")
 uploaded_file = st.file_uploader("Upload Notes (PDF or Image)", type=["png", "jpg", "jpeg", "pdf"])
+is_new_file = uploaded_file and uploaded_file.name != st.session_state.last_image_name
 
 # Change Detection
-if uploaded_file and uploaded_file.name != st.session_state.last_image_name:
+if is_new_file:
     st.session_state.study_guide = None
     st.session_state.chat_history = []
-    st.session_state.last_image_name = uploaded_file.name
+    st.session_state.quiz_data = None
     st.session_state.pdf_bytes = None
 
 if uploaded_file:
-    content_to_analyze = []
-    
-    # Use File Utils for processing
-    if uploaded_file.type == "application/pdf":
-        with st.spinner("Processing PDF..."):
-            try:
-                content_to_analyze = process_pdf_to_images(uploaded_file.read())
-                st.image(content_to_analyze[0], caption="PDF Loaded", width=400)
-            except Exception as e:
-                st.error(e); st.stop()
-    else:
-        img = Image.open(uploaded_file)
-        content_to_analyze = [img]
-        st.image(img, caption="Image Loaded", width=400)
 
-    st.session_state.content_to_analyze = content_to_analyze
+    # Initialize session state for content if it doesn't exist
+    if "content_to_analyze" not in st.session_state:
+        st.session_state.content_to_analyze = []
 
-    # --- AUTO-SUMMARIZE ---
-    if st.session_state.study_guide is None:
-        with st.spinner("🤖 Analyzing... this may take a moment."):
+    # --- STEP 1: ONLY PROCESS IF IT'S A NEW FILE ---
+    if is_new_file:
+        with st.spinner("Processing file for the first time..."):
+            if uploaded_file.type == "application/pdf":
+                # Process PDF to images once and store them
+                st.session_state.content_to_analyze = process_pdf_to_images(uploaded_file.read())
+            else:
+                img = Image.open(BytesIO(uploaded_file))
+                st.session_state.content_to_analyze = [img]
+            
+            # Reset state for the new file
+            st.session_state.last_image_name = uploaded_file.name
+            st.session_state.study_guide = None
+            st.session_state.quiz_data = None
+            st.session_state.pdf_bytes = None
+            st.session_state.chat_history = []
+
+    # --- STEP 2: DISPLAY PREVIEW (Instant from memory) ---
+    if st.session_state.content_to_analyze:
+        st.image(st.session_state.content_to_analyze[0], caption="Preview", width=400)
+
+    # --- STEP 3: AUTO-SUMMARIZE ---
+    if st.session_state.study_guide is None and st.session_state.content_to_analyze:
+        with st.spinner("🤖 Analyzing..."):
             try:
-                data = ai_service.generate_study_guide(content_to_analyze)
+                # Use the stored content
+                data = ai_service.generate_study_guide(st.session_state.content_to_analyze)
                 st.session_state.study_guide = data
                 st.rerun()
             except Exception as e:
@@ -105,7 +137,7 @@ if uploaded_file:
 
 # --- 5. DISPLAY TABS ---
 if st.session_state.study_guide:
-    tab1, tab2 = st.tabs(["📖 Study Guide", "💬 Chat"])
+    tab1, tab2, tab3 = st.tabs(["📖 Study Guide", "💬 Chat", "🧠 Quiz"])
     data = st.session_state.study_guide
 
     with tab1:
@@ -120,8 +152,9 @@ if st.session_state.study_guide:
                 st.audio(b, format="audio/mp3")
         with col_b:
             # Use File Utils for Export
-            if st.session_state.get("pdf_bytes") is None:
-                st.session_state.pdf_bytes = generate_study_pdf(data)
+            if st.session_state.pdf_bytes is None:
+                with st.spinner("Preparing export..."):
+                    st.session_state.pdf_bytes = generate_study_pdf(data)
 
             st.download_button(
                 "📄 Download PDF",
@@ -177,7 +210,8 @@ if st.session_state.study_guide:
                             )
                             
                             for chunk in responses:
-                                if hasattr(chunk, "text") and chunk.text:
+                                text = getattr(chunk, "text", None)
+                                if text:
                                     full_res += chunk.text
                                     placeholder.markdown(full_res)
                             
@@ -194,7 +228,7 @@ if st.session_state.study_guide:
             st.divider()
             
             # 1. Create the text content
-            chat_text = f"AI Study Buddy - Chat History\nDate: 2026-03-04\nDocument: {st.session_state.last_image_name}\n"
+            chat_text = f"AI Study Buddy - Chat History\nDate: {datetime.now().strftime('%Y-%m-%d')}\nDocument: {st.session_state.last_image_name}\n"
             chat_text += "="*30 + "\n\n"
             
             for chat in st.session_state.chat_history:
@@ -210,3 +244,130 @@ if st.session_state.study_guide:
                 mime="text/plain",
                 use_container_width=True
             )
+    
+    with tab3:
+        st.header("🧠 Knowledge Check")
+
+        # 1. GENERATE BUTTON
+        if st.button("✨ Generate New Quiz", use_container_width=True):
+            if st.session_state.content_to_analyze:
+                with st.spinner("Analyzing notes and drafting questions..."):
+                    try:
+                        st.session_state.quiz_data = ai_service.generate_quiz(
+                            st.session_state.content_to_analyze,
+                            selected_model,
+                            _seed=random.randint(1, 10000)
+                        )
+                        st.session_state.user_answers = {}
+                        st.session_state.weak_topics = []
+                        st.session_state.quiz_submitted = False
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to generate quiz: {e}")
+            else:
+                st.warning("⚠️ Please upload a document in the 'Upload' tab first!")
+
+        # 2. DISPLAY QUIZ
+        if st.session_state.quiz_data and not st.session_state.quiz_submitted:
+            st.info("💡 Select the best answer for each question and hit 'Check My Answers'.")
+
+            with st.form("quiz_form"):
+                current_answers = {} # Temporary dict to hold form selections
+                for i, q in enumerate(st.session_state.quiz_data):
+                    st.subheader(f"Q{i+1}: {q['question']}")
+                    current_val = st.session_state.user_answers.get(i)
+                    try:
+                        # Find the index of the answer we already picked
+                        idx = q["options"].index(current_val) if current_val in q["options"] else None
+                    except:
+                        idx = None
+
+                    current_answers[i] = st.radio(
+                        "Choose an answer:",
+                        q["options"],
+                        key=f"q_radio_{i}",
+                        index=idx  # This keeps the UI from resetting!
+                    )
+                    st.divider()
+
+                submit_quiz = st.form_submit_button("🏁 Check My Answers", use_container_width=True)
+
+            # 3. GRADING LOGIC (Triggered by Submit)
+            if submit_quiz:
+                # Check if any answer is None
+                if None in current_answers.values():
+                    st.warning("⚠️ Please answer all questions before submitting.")
+                else:
+                    # Move temp answers to session state
+                    st.session_state.user_answers = current_answers
+                    st.session_state.quiz_submitted = True
+                
+                    score = 0
+                    temp_weak_topics = []
+                    for i, q in enumerate(st.session_state.quiz_data):
+                        user_ans = st.session_state.user_answers[i]
+                        correct_ans = q["answer"]
+                        if user_ans.strip().lower() == correct_ans.strip().lower():
+                            score += 1
+                        else:
+                            temp_weak_topics.append({
+                                "question": q["question"],
+                                "your_answer": user_ans,
+                                "correct_answer": q["answer"],
+                                "explanation": q["explanation"]
+                                })
+                            
+                    st.write("User Answer:", user_ans)
+                    st.write("Correct Answer:", correct_ans)
+                    st.session_state.last_score = score
+                    st.session_state.weak_topics = temp_weak_topics
+                    st.session_state.quiz_history.append({"score": score, "total": len(st.session_state.quiz_data)})
+                    st.rerun() # Rerun to show results
+
+        # 4. SHOW RESULTS (Outside the form, stays on screen)
+        if st.session_state.quiz_submitted and st.session_state.quiz_data:
+            st.metric("Final Score", f"{st.session_state.last_score} / {len(st.session_state.quiz_data)}")
+        
+            if st.session_state.last_score == len(st.session_state.quiz_data):
+                st.success("🎉 Perfect Score!")
+                st.balloons()
+
+            for i, q in enumerate(st.session_state.quiz_data):
+                user_ans = st.session_state.user_answers.get(i)
+                if user_ans == q["answer"]:
+                    st.write(f"✅ **Q{i+1}**: Correct!")
+                else:
+                    st.write(f"❌ **Q{i+1}**: Incorrect")
+                    with st.expander(f"View explanation for Q{i+1}"):
+                        st.write(f"**Correct Answer:** {q['answer']}")
+                        st.write(f"**Explanation:** {q['explanation']}")
+
+            # 5. ADAPTIVE PRACTICE (Appears only if they missed something)
+            if st.session_state.weak_topics:
+                st.divider()
+                st.subheader("📚 Targeted Review")
+                if st.button("🚀 Generate Practice Quiz", use_container_width=True):
+                    with st.spinner("Creating practice..."):
+                        try:
+                            followup = ai_service.generate_followup_quiz(
+                                st.session_state.weak_topics,
+                                st.session_state.content_to_analyze,
+                                selected_model
+                            )
+                            st.session_state.quiz_data = followup
+                            st.session_state.user_answers = {}
+                            st.session_state.weak_topics = []
+                            st.session_state.quiz_submitted = False
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
+
+        # 6. HISTORY (Always at the bottom)
+        if st.session_state.quiz_history:
+            st.divider()
+            st.subheader("📊 Your Progress")
+            import pandas as pd
+            df = pd.DataFrame(st.session_state.quiz_history)
+            df["Accuracy"] = (df["score"] / df["total"].replace(0,1) * 100).round(2)
+            st.line_chart(df["Accuracy"])
+            st.dataframe(df, use_container_width=True)

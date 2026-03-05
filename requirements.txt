@@ -5,3 +5,4 @@ pypdf
 pdf2image
 gTTS
 fpdf2
+PyPDF2
