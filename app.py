@@ -7,6 +7,14 @@ from gtts import gTTS
 from io import BytesIO
 from datetime import datetime
 import random
+import json
+import hashlib
+from database_manager import DatabaseManager
+db = DatabaseManager()
+
+def generate_file_hash(file_bytes):
+    """Create a unique hash for the uploaded file."""
+    return hashlib.sha256(file_bytes).hexdigest()
 
 # Caching
 @st.cache_resource
@@ -67,7 +75,7 @@ with st.sidebar:
     st.title("⚙️ Settings")
     model_choice = st.radio("Mode:", ["🧠 Think Mode", "⚡ Fast Mode"])
     if model_choice == "🧠 Think Mode":
-        selected_model = "gemini-2.5-flash"
+        selected_model = "gemini-3.1-flash-lite-preview"
     else:
         selected_model = "gemini-2.5-flash-lite"
 
@@ -98,42 +106,92 @@ if is_new_file:
     st.session_state.pdf_bytes = None
 
 if uploaded_file:
-
-    # Initialize session state for content if it doesn't exist
+    # 1. Setup
+    file_name = uploaded_file.name
+    bytes_data = uploaded_file.getvalue()
+    file_hash = hashlib.sha256(bytes_data).hexdigest()
+    
     if "content_to_analyze" not in st.session_state:
         st.session_state.content_to_analyze = []
 
-    # --- STEP 1: ONLY PROCESS IF IT'S A NEW FILE ---
-    if is_new_file:
-        with st.spinner("Processing file for the first time..."):
-            if uploaded_file.type == "application/pdf":
-                # Process PDF to images once and store them
-                st.session_state.content_to_analyze = process_pdf_to_images(uploaded_file.read())
-            else:
-                img = Image.open(BytesIO(uploaded_file))
-                st.session_state.content_to_analyze = [img]
+    # 2. CHECK THE DATABASE (The Vault)
+    existing_doc = db.get_document(file_name)
+
+    if existing_doc:
+        # --- CACHE HIT: No AI tokens needed! ---
+        if st.session_state.get('last_image_name') != file_name:
+            st.success(f"✨ Found '{file_name}' in your library. Loading cached data...")
             
-            # Reset state for the new file
-            st.session_state.last_image_name = uploaded_file.name
+            # Load stored AI results into session state
+            st.session_state.study_guide = {
+                "summary": existing_doc['ai_summary'],
+                "key_terms": json.loads(existing_doc['ai_flashcards']) if isinstance(existing_doc['ai_flashcards'], str) else existing_doc['ai_flashcards']
+            }
+            # Convert string back to Python list/dict
+            if existing_doc['ai_quiz']:
+                st.session_state.quiz_data = json.loads(existing_doc['ai_quiz'])
+            else:
+                st.session_state.quiz_data = None
+            # Keep track of the current ID for the "Mistake Inbox" later
+            st.session_state.current_doc_id = existing_doc['id']
+            st.session_state.last_image_name = file_name
+            
+            # We still need the images for the UI/Chat display
+            if not st.session_state.content_to_analyze:
+                with st.spinner("Preparing views..."):
+                    bytes_data = uploaded_file.getvalue()
+                    st.session_state.content_to_analyze = process_pdf_to_images(bytes_data)
+    
+    else:
+        # --- CACHE MISS: Process with Gemini for the first time ---
+        with st.spinner("Analyzing new document... (This uses tokens)"):
+            # A. Process file to images/text
+            bytes_data = uploaded_file.read()
+            if uploaded_file.type == "application/pdf":
+                st.session_state.content_to_analyze = process_pdf_to_images(bytes_data)
+            else:
+                img = Image.open(BytesIO(bytes_data))
+                st.session_state.content_to_analyze = [img]
+
+            # B. Clear old state
+            st.session_state.last_image_name = file_name
             st.session_state.study_guide = None
             st.session_state.quiz_data = None
-            st.session_state.pdf_bytes = None
-            st.session_state.chat_history = []
+            
+            # Note: We SAVE to the DB only AFTER the first AI calls are made 
+            # in your "Generate" buttons to make sure we have data to store.
 
     # --- STEP 2: DISPLAY PREVIEW (Instant from memory) ---
     if st.session_state.content_to_analyze:
         st.image(st.session_state.content_to_analyze[0], caption="Preview", width=400)
 
     # --- STEP 3: AUTO-SUMMARIZE ---
-    if st.session_state.study_guide is None and st.session_state.content_to_analyze:
-        with st.spinner("🤖 Analyzing..."):
-            try:
-                # Use the stored content
-                data = ai_service.generate_study_guide(st.session_state.content_to_analyze)
-                st.session_state.study_guide = data
-                st.rerun()
-            except Exception as e:
-                st.error(f"Analysis Error: {e}")
+if st.session_state.study_guide is None and st.session_state.content_to_analyze:
+    with st.spinner("🤖 Analyzing..."):
+        try:
+            # 1. CALL THE AI
+            data = ai_service.generate_study_guide(st.session_state.content_to_analyze)
+            
+            # 2. SAVE TO DATABASE (The "Vault")
+            db.save_document(
+                filename=file_name,
+                file_hash=file_hash,
+                raw_text="", # Add your text extraction here if needed
+                summary=data['summary'],
+                flashcards=data['key_terms'], # Manager will JSON stringify this!
+                quiz_data=None
+            )
+            
+            # 3. SET STATE
+            st.session_state.study_guide = data
+            
+            # 4. GET THE ID (Crucial for linking quiz results later)
+            saved_doc = db.get_document(file_name)
+            st.session_state.current_doc_id = saved_doc['id']
+            
+            st.rerun()
+        except Exception as e:
+            st.error(f"Analysis Error: {e}")
 
 # --- 5. DISPLAY TABS ---
 if st.session_state.study_guide:
@@ -267,100 +325,116 @@ if st.session_state.study_guide:
             else:
                 st.warning("⚠️ Please upload a document in the 'Upload' tab first!")
 
-        # 2. DISPLAY QUIZ
-        if st.session_state.quiz_data and not st.session_state.quiz_submitted:
-            st.info("💡 Select the best answer for each question and hit 'Check My Answers'.")
+        # 2. VALIDATION & RENDERING
+        if st.session_state.quiz_data:
+            # The Guardrail: Check if the data is actually a quiz (has 'question' key)
+            is_valid = isinstance(st.session_state.quiz_data, list) and \
+                    len(st.session_state.quiz_data) > 0 and \
+                    'question' in st.session_state.quiz_data[0]
 
-            with st.form("quiz_form"):
-                current_answers = {} # Temporary dict to hold form selections
-                for i, q in enumerate(st.session_state.quiz_data):
-                    st.subheader(f"Q{i+1}: {q['question']}")
-                    current_val = st.session_state.user_answers.get(i)
-                    try:
-                        # Find the index of the answer we already picked
-                        idx = q["options"].index(current_val) if current_val in q["options"] else None
-                    except:
-                        idx = None
-
-                    current_answers[i] = st.radio(
-                        "Choose an answer:",
-                        q["options"],
-                        key=f"q_radio_{i}",
-                        index=idx  # This keeps the UI from resetting!
-                    )
-                    st.divider()
-
-                submit_quiz = st.form_submit_button("🏁 Check My Answers", use_container_width=True)
-
-            # 3. GRADING LOGIC (Triggered by Submit)
-            if submit_quiz:
-                # Check if any answer is None
-                if None in current_answers.values():
-                    st.warning("⚠️ Please answer all questions before submitting.")
-                else:
-                    # Move temp answers to session state
-                    st.session_state.user_answers = current_answers
-                    st.session_state.quiz_submitted = True
+            if is_valid:
+                # --- CASE A: QUIZ NOT SUBMITTED (Show Form) ---
+                if not st.session_state.quiz_submitted:
+                    st.info("💡 Select the best answer for each question and hit 'Check My Answers'.")
                 
-                    score = 0
-                    temp_weak_topics = []
-                    for i, q in enumerate(st.session_state.quiz_data):
-                        user_ans = st.session_state.user_answers[i]
-                        correct_ans = q["answer"]
-                        if user_ans.strip().lower() == correct_ans.strip().lower():
-                            score += 1
-                        else:
-                            temp_weak_topics.append({
-                                "question": q["question"],
-                                "your_answer": user_ans,
-                                "correct_answer": q["answer"],
-                                "explanation": q["explanation"]
-                                })
-                            
-                    st.write("User Answer:", user_ans)
-                    st.write("Correct Answer:", correct_ans)
-                    st.session_state.last_score = score
-                    st.session_state.weak_topics = temp_weak_topics
-                    st.session_state.quiz_history.append({"score": score, "total": len(st.session_state.quiz_data)})
-                    st.rerun() # Rerun to show results
+                    # Dynamic Form Key prevents the "Duplicate Key" error
+                    doc_id = st.session_state.get('current_doc_id', 'new')
+                    form_key = f"quiz_form_{doc_id}"
 
-        # 4. SHOW RESULTS (Outside the form, stays on screen)
-        if st.session_state.quiz_submitted and st.session_state.quiz_data:
-            st.metric("Final Score", f"{st.session_state.last_score} / {len(st.session_state.quiz_data)}")
-        
-            if st.session_state.last_score == len(st.session_state.quiz_data):
-                st.success("🎉 Perfect Score!")
-                st.balloons()
+                    with st.form(form_key):
+                        current_answers = {} 
+                        for i, q in enumerate(st.session_state.quiz_data):
+                            st.subheader(f"Q{i+1}: {q['question']}")
+                        
+                            # Handle persistence (index management)
+                            current_val = st.session_state.user_answers.get(i)
+                            try:
+                                idx = q["options"].index(current_val) if current_val in q["options"] else None
+                            except:
+                                idx = None
 
-            for i, q in enumerate(st.session_state.quiz_data):
-                user_ans = st.session_state.user_answers.get(i)
-                if user_ans == q["answer"]:
-                    st.write(f"✅ **Q{i+1}**: Correct!")
-                else:
-                    st.write(f"❌ **Q{i+1}**: Incorrect")
-                    with st.expander(f"View explanation for Q{i+1}"):
-                        st.write(f"**Correct Answer:** {q['answer']}")
-                        st.write(f"**Explanation:** {q['explanation']}")
-
-            # 5. ADAPTIVE PRACTICE (Appears only if they missed something)
-            if st.session_state.weak_topics:
-                st.divider()
-                st.subheader("📚 Targeted Review")
-                if st.button("🚀 Generate Practice Quiz", use_container_width=True):
-                    with st.spinner("Creating practice..."):
-                        try:
-                            followup = ai_service.generate_followup_quiz(
-                                st.session_state.weak_topics,
-                                st.session_state.content_to_analyze,
-                                selected_model
+                            current_answers[i] = st.radio(
+                                "Choose an answer:",
+                                q["options"],
+                                key=f"q_radio_{i}_{doc_id}", # Unique key per question/doc
+                                index=idx
                             )
-                            st.session_state.quiz_data = followup
-                            st.session_state.user_answers = {}
-                            st.session_state.weak_topics = []
-                            st.session_state.quiz_submitted = False
+                            st.divider()
+
+                        submit_quiz = st.form_submit_button("🏁 Check My Answers", use_container_width=True)
+
+                    # 3. GRADING LOGIC (Inside the form check)
+                    if submit_quiz:
+                        if None in current_answers.values():
+                            st.warning("⚠️ Please answer all questions before submitting.")
+                        else:
+                            st.session_state.user_answers = current_answers
+                            st.session_state.quiz_submitted = True
+                        
+                            score = 0
+                            temp_weak_topics = []
+                            for i, q in enumerate(st.session_state.quiz_data):
+                                user_ans = current_answers[i]
+                                if user_ans.strip().lower() == q["answer"].strip().lower():
+                                    score += 1
+                                else:
+                                    temp_weak_topics.append({
+                                        "question": q["question"],
+                                        "your_answer": user_ans,
+                                        "correct_answer": q["answer"],
+                                        "explanation": q["explanation"]
+                                    })
+                        
+                            st.session_state.last_score = score
+                            st.session_state.weak_topics = temp_weak_topics
+                            # Ensure quiz_history exists in session state before appending
+                            if "quiz_history" not in st.session_state:
+                                st.session_state.quiz_history = []
+                            st.session_state.quiz_history.append({"score": score, "total": len(st.session_state.quiz_data)})
                             st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed: {e}")
+
+                # --- CASE B: QUIZ SUBMITTED (Show Results) ---
+                else:
+                    st.metric("Final Score", f"{st.session_state.last_score} / {len(st.session_state.quiz_data)}")
+                
+                    if st.session_state.last_score == len(st.session_state.quiz_data):
+                        st.success("🎉 Perfect Score!")
+                        st.balloons()
+
+                    for i, q in enumerate(st.session_state.quiz_data):
+                        user_ans = st.session_state.user_answers.get(i)
+                        if user_ans == q["answer"]:
+                            st.write(f"✅ **Q{i+1}**: Correct!")
+                        else:
+                            st.write(f"❌ **Q{i+1}**: Incorrect")
+                            with st.expander(f"View explanation for Q{i+1}"):
+                                st.write(f"**Correct Answer:** {q['answer']}")
+                                st.write(f"**Explanation:** {q['explanation']}")
+
+                    # 5. ADAPTIVE PRACTICE
+                    if st.session_state.weak_topics:
+                        st.divider()
+                        st.subheader("📚 Targeted Review")
+                        if st.button("🚀 Generate Practice Quiz", use_container_width=True):
+                            with st.spinner("Creating practice..."):
+                                try:
+                                    followup = ai_service.generate_followup_quiz(
+                                        st.session_state.weak_topics,
+                                        st.session_state.content_to_analyze,
+                                        selected_model
+                                    )
+                                    st.session_state.quiz_data = followup
+                                    st.session_state.user_answers = {}
+                                    st.session_state.weak_topics = []
+                                    st.session_state.quiz_submitted = False
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed: {e}")
+            else:
+                # The Guardrail caught bad data (like flashcards)
+                st.warning("⚠️ Saved quiz data is in an old format or invalid. Please click 'Generate New Quiz' above.")
+        else:
+            st.info("No quiz found for this document. Click 'Generate New Quiz' to get started!")
 
         # 6. HISTORY (Always at the bottom)
         if st.session_state.quiz_history:

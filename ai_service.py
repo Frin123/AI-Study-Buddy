@@ -33,13 +33,12 @@ class AIService:
         except Exception as e:
             raise ValueError(f"Failed to process PDF: {e}")
 
-    def get_model(self, task_type, user_choice="gemini-2.5-flash"):
+    def get_model(self, task_type, user_choice="gemini-3.1-flash-lite-preview"):
         """Centralized model router."""
         if task_type == "auto":
-            return "gemini-2.5-flash" 
+            return "gemini-3.1-flash-lite-preview" 
         return user_choice
 
-    @st.cache_data
     def generate_study_guide(_self, _content_text):
         """
         Analyzes text and returns structured JSON.
@@ -49,9 +48,6 @@ class AIService:
         if not _content_text:
             raise ValueError("No content was provided for analysis.")
         
-
-        model_id = "gemini-2.5-flash-lite"
-
         model_config = types.GenerateContentConfig(
             system_instruction=_self.sys_instr,
             response_mime_type='application/json',
