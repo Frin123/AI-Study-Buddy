@@ -9,6 +9,7 @@ from datetime import datetime
 import random
 import json
 import hashlib
+import pandas as pd
 from database_manager import DatabaseManager
 db = DatabaseManager()
 
@@ -195,7 +196,7 @@ if st.session_state.study_guide is None and st.session_state.content_to_analyze:
 
 # --- 5. DISPLAY TABS ---
 if st.session_state.study_guide:
-    tab1, tab2, tab3 = st.tabs(["📖 Study Guide", "💬 Chat", "🧠 Quiz"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📖 Study Guide", "💬 Chat", "🧠 Quiz", "📊 Analytics"])
     data = st.session_state.study_guide
 
     with tab1:
@@ -233,6 +234,22 @@ if st.session_state.study_guide:
 
     with tab2:
         st.subheader("💬 Chat")
+
+        # --- DB SYNC LOGIC ---
+        # 1. Ensure the session state exists
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        # 2. Load from DB if the session state is empty (prevents redundant DB calls)
+        doc_id = st.session_state.get('current_doc_id')
+        if doc_id and not st.session_state.chat_history:
+            # Pull saved messages from your database_manager
+            db_history = db.get_chat_history(doc_id)
+            # Convert DB format (role/content) to your UI format (question/answer) if necessary
+            # If your DB stores pairs, load them here. 
+            # For simplicity, let's assume get_chat_history returns the pairs:
+            st.session_state.chat_history = db_history
+
         # 1. Create a container for the chat history
         # This keeps the history separate from the input box
         chat_container = st.container(height=500) # Fixed height creates a scrollbar
@@ -272,6 +289,10 @@ if st.session_state.study_guide:
                                 if text:
                                     full_res += chunk.text
                                     placeholder.markdown(full_res)
+
+                            # --- SAVE TO DB ---
+                            # Save the Q&A pair to your new chat_history table
+                            db.save_chat_message(doc_id, user_q, full_res)
                             
                             # Save to history and rerun to lock it in
                             st.session_state.chat_history.append({"question": user_q, "answer": full_res})
@@ -363,35 +384,74 @@ if st.session_state.study_guide:
 
                         submit_quiz = st.form_submit_button("🏁 Check My Answers", use_container_width=True)
 
-                    # 3. GRADING LOGIC (Inside the form check)
-                    if submit_quiz:
-                        if None in current_answers.values():
-                            st.warning("⚠️ Please answer all questions before submitting.")
-                        else:
-                            st.session_state.user_answers = current_answers
-                            st.session_state.quiz_submitted = True
-                        
-                            score = 0
-                            temp_weak_topics = []
-                            for i, q in enumerate(st.session_state.quiz_data):
-                                user_ans = current_answers[i]
-                                if user_ans.strip().lower() == q["answer"].strip().lower():
-                                    score += 1
-                                else:
-                                    temp_weak_topics.append({
-                                        "question": q["question"],
-                                        "your_answer": user_ans,
-                                        "correct_answer": q["answer"],
-                                        "explanation": q["explanation"]
-                                    })
-                        
-                            st.session_state.last_score = score
-                            st.session_state.weak_topics = temp_weak_topics
-                            # Ensure quiz_history exists in session state before appending
-                            if "quiz_history" not in st.session_state:
-                                st.session_state.quiz_history = []
-                            st.session_state.quiz_history.append({"score": score, "total": len(st.session_state.quiz_data)})
-                            st.rerun()
+                        # 3. CONSOLIDATED GRADING & DATABASE LOGIC
+                        if submit_quiz:
+                            if None in current_answers.values():
+                                st.warning("⚠️ Please answer all questions before submitting.")
+                            else:
+                                # 1. Update Session State status
+                                st.session_state.user_answers = current_answers
+                                st.session_state.quiz_submitted = True
+                            
+                                score = 0
+                                temp_weak_topics = []
+                                db_mistakes = [] # For the JSON attempt storage
+
+                                # 2. Grade the Quiz
+                                for i, q in enumerate(st.session_state.quiz_data):
+                                    user_ans = current_answers[i]
+                                    # Clean up strings for comparison
+                                    if user_ans.strip().lower() == q["answer"].strip().lower():
+                                        score += 1
+                                    else:
+                                        # Add to UI weak topics
+                                        temp_weak_topics.append({
+                                            "question": q["question"],
+                                            "your_answer": user_ans,
+                                            "correct_answer": q["answer"],
+                                            "explanation": q["explanation"]
+                                        })
+
+                                        # DAY 8: Save individual mistake to DB
+                                        db.save_wrong_question(doc_id, q["question"], q["answer"], user_ans)
+                                    
+                                        # Prepare mistake list for the full attempt JSON
+                                        db_mistakes.append({
+                                            "q": q["question"], 
+                                            "a": user_ans, 
+                                            "correct": q["answer"]
+                                        })
+
+                                # 3. SAVE TO DATABASE
+                                # Save the deep details (mistakes as JSON)
+                                db.save_quiz_attempt(doc_id, score, len(st.session_state.quiz_data), db_mistakes)
+                                # Save the high-level result for quick stats
+                                db.save_quiz_result(doc_id, score, len(st.session_state.quiz_data))
+
+                                # 4. Final Session State Updates
+                                st.session_state.last_score = score
+                                st.session_state.weak_topics = temp_weak_topics
+                            
+                                if "quiz_history" not in st.session_state:
+                                    st.session_state.quiz_history = []
+                                    st.session_state.quiz_history.append({"score": score, "total": len(st.session_state.quiz_data)})
+
+                                # 1. Save the Quiz Attempt (Existing)
+                                db.save_quiz_attempt(doc_id, score, len(st.session_state.quiz_data), db_mistakes)
+        
+                                # 2. SAVE THE STUDY SESSION (New Step 2 Code)
+                                # This treats the completion of a quiz as the 'end' of a study block
+                                db.save_study_session(
+                                    doc_id=doc_id,
+                                    questions_answered=len(st.session_state.quiz_data),
+                                    score=score
+                                )
+        
+                                # ... (rest of your rerun logic) ...
+                                st.success("Session recorded! Check the Analytics tab to see your progress.")
+                            
+                                # 5. Rerun to show the "Results" view (Case B)
+                                st.rerun()
 
                 # --- CASE B: QUIZ SUBMITTED (Show Results) ---
                 else:
@@ -445,3 +505,81 @@ if st.session_state.study_guide:
             df["Accuracy"] = (df["score"] / df["total"].replace(0,1) * 100).round(2)
             st.line_chart(df["Accuracy"])
             st.dataframe(df, use_container_width=True)
+
+    with tab4:
+        st.header("📊 Performance Dashboard")
+        st.caption("📦 Data stored in local SQLite (Resets on new deployment)")
+
+        # 1. FETCH AGGREGATE STATS
+        avg_score = db.get_average_score()
+    
+        # We query the new study_sessions table for volume stats
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            session_stats = cursor.execute("""
+                SELECT 
+                    SUM(questions_answered) as total_q, 
+                    COUNT(*) as total_sessions 
+                FROM study_sessions
+            """).fetchone()
+        
+            total_questions = session_stats['total_q'] or 0
+            total_sessions = session_stats['total_sessions'] or 0
+            total_sessions = session_stats['total_sessions'] if session_stats['total_sessions'] else 0
+
+        # 2. TOP METRICS ROW
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Global Accuracy", f"{round(avg_score * 100, 1)}%")
+        with col2:
+            st.metric("Questions Practiced", total_questions)
+        with col3:
+            st.metric("Study Sessions", total_sessions)
+
+        st.divider()
+
+        # 3. PERFORMANCE OVER TIME (Chart)
+        st.subheader("📈 Knowledge Growth")
+        trend_data = db.get_score_trend()
+    
+        if trend_data:
+            # Convert SQLite rows to a DataFrame for plotting
+            df = pd.DataFrame(trend_data)
+            df.columns = ["Date", "Score"]
+            df["Score"] = df["Score"] * 100
+            df["Date"] = pd.to_datetime(df["Date"])
+        
+            # Plotting the line chart
+            st.line_chart(df.set_index("Date"))
+        else:
+            st.info("Finish your first quiz to see your performance trend!")
+
+        st.divider()
+
+        # 4. THE MISTAKE INBOX (Review)
+        st.subheader("📓 Mistake Inbox")
+        st.write("Review your most recent errors to turn them into strengths.")
+    
+        recent_mistakes = db.get_wrong_questions()
+    
+        if recent_mistakes:
+            # Show only the 5 most recent mistakes to keep the UI clean
+            for m in recent_mistakes[-5:]:
+                with st.expander(f"Question: {m['question'][:60]}..."):
+                    st.write(f"**Full Question:** {m['question']}")
+                    st.error(f"**Your Answer:** {m['user_answer']}")
+                    st.success(f"**Correct Answer:** {m['correct_answer']}")
+        else:
+            st.success("Clean slate! You haven't made any mistakes yet.")
+
+
+        # 5. DANGER ZONE
+        st.markdown("---")
+        with st.expander("⚠️ Danger Zone"):
+            st.write("Deleting your history is permanent and cannot be undone.")
+            if st.button("🗑️ Clear All Study History", use_container_width=True, type="primary"):
+                db.clear_all_history()
+                st.session_state.quiz_history = []
+                st.session_state.last_score = 0
+                st.success("History wiped! Starting with a clean slate.")
+                st.rerun()

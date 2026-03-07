@@ -65,6 +65,41 @@ class DatabaseManager:
             )
             """)
 
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS quiz_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER,
+                score INTEGER,
+                total_questions INTEGER,
+                mistakes_json TEXT,  -- Stores the questions you got wrong as JSON
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (doc_id) REFERENCES documents (id)
+            )
+            ''')
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER,
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                end_time TIMESTAMP,
+                questions_answered INTEGER DEFAULT 0,
+                score INTEGER DEFAULT 0,
+                FOREIGN KEY (doc_id) REFERENCES documents (id)
+            )
+            """)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER,
+                question TEXT,
+                answer TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (doc_id) REFERENCES documents (id)
+            )
+            """)
+
             conn.commit()
 
     # -------------------------------
@@ -142,6 +177,15 @@ class DatabaseManager:
             ORDER BY timestamp
             """)
             return cursor.fetchall()
+    
+    def save_quiz_attempt(self, doc_id, score, total, mistakes):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO quiz_attempts (doc_id, score, total_questions, mistakes_json)
+                VALUES (?, ?, ?, ?)
+            ''', (doc_id, score, total, json.dumps(mistakes)))
+            conn.commit()
 
     # -------------------------------
     # WRONG QUESTIONS (Mistake Inbox)
@@ -169,3 +213,67 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(query, params)
             return cursor.fetchall()
+        
+    def save_study_session(self, doc_id, questions_answered, score):
+        """Closes the current session by recording the end time and stats."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # We assume the session started when they opened the doc
+            # This query finds the most recent 'open' session for this doc and updates it
+            cursor.execute("""
+                INSERT INTO study_sessions (doc_id, questions_answered, score, end_time)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """, (doc_id, questions_answered, score))
+            conn.commit()
+
+
+    def get_urgency_report(self):
+        """Calculates Urgency: (1 - avg_accuracy) * days_since_last_review"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    d.filename,
+                    1.0 - AVG(qh.score * 1.0 / qh.total_questions) as failure_rate,
+                    (julianday('now') - julianday(MAX(qh.timestamp))) as days_since
+                FROM documents d
+                JOIN quiz_history qh ON d.id = qh.doc_id
+                GROUP BY d.id
+            """)
+            results = cursor.fetchall()
+        
+            # Calculate U = failure_rate * days_since
+            report = []
+            for row in results:
+                urgency = row['failure_rate'] * (row['days_since'] + 1) # +1 to avoid 0
+                report.append({"file": row['filename'], "urgency": round(urgency, 2)})
+            
+            return sorted(report, key=lambda x: x['urgency'], reverse=True)
+        
+    def clear_all_history(self):
+        """Wipes all user progress data but keeps the uploaded documents."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM quiz_history")
+            cursor.execute("DELETE FROM quiz_attempts")
+            cursor.execute("DELETE FROM wrong_questions")
+            cursor.execute("DELETE FROM study_sessions")
+            conn.commit()
+
+
+    def save_chat_message(self, doc_id, role, content):
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO chat_history (doc_id, question, answer) VALUES (?, ?, ?)",
+                (doc_id, role, content)
+            )
+            conn.commit()
+
+    def get_chat_history(self, doc_id):
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT question, answer FROM chat_history WHERE doc_id = ? ORDER BY timestamp ASC",
+                (doc_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
