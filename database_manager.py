@@ -225,30 +225,6 @@ class DatabaseManager:
                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             """, (doc_id, questions_answered, score))
             conn.commit()
-
-
-    def get_urgency_report(self):
-        """Calculates Urgency: (1 - avg_accuracy) * days_since_last_review"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT 
-                    d.filename,
-                    1.0 - AVG(qh.score * 1.0 / qh.total_questions) as failure_rate,
-                    (julianday('now') - julianday(MAX(qh.timestamp))) as days_since
-                FROM documents d
-                JOIN quiz_history qh ON d.id = qh.doc_id
-                GROUP BY d.id
-            """)
-            results = cursor.fetchall()
-        
-            # Calculate U = failure_rate * days_since
-            report = []
-            for row in results:
-                urgency = row['failure_rate'] * (row['days_since'] + 1) # +1 to avoid 0
-                report.append({"file": row['filename'], "urgency": round(urgency, 2)})
-            
-            return sorted(report, key=lambda x: x['urgency'], reverse=True)
         
     def clear_all_history(self):
         """Wipes all user progress data but keeps the uploaded documents."""

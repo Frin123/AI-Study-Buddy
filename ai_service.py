@@ -143,20 +143,20 @@ class AIService:
                 # If it STILL fails, we give a clean error instead of a crash
                 raise ValueError("The AI's response format was slightly off. Please click 'Generate' again.")
         
-    def generate_followup_quiz(self, weak_topics, _content_text, model_id):
+    def generate_adaptive_quiz(self, _content_text, model_id, focus_areas=None, _seed=None):
         """
-        Generates a targeted quiz based on questions the user got wrong.
+        Adaptive version that replaces your old generate_followup_quiz.
         """
-        # Convert the list of weak topics into a readable string for the prompt
-        topics_str = "\n".join([str(t) for t in weak_topics])
+        # 1. Prepare the prompt with focus_areas if they exist
+        topics_str = "\n".join([str(t) for t in focus_areas]) if focus_areas else "General concepts from the notes"
         
         prompt = f"""
-        The student is struggling with the following concepts:
-        {topics_str}
-
-        Generate a new 3-question multiple choice quiz focusing SPECIFICALLY on these weak areas.
-        Return ONLY a valid JSON array. No markdown.
-        Format: [{{"question": "...", "options": ["A", "B", "C", "D"], "answer": "...", "explanation": "..."}}]
+        Generate a 3-question multiple choice quiz.
+        FOCUS AREA: {topics_str}
+        
+        Requirements:
+        - Return ONLY a valid JSON array.
+        - Format: [{{"question": "...", "options": ["A", "B", "C", "D"], "answer": "...", "explanation": "..."}}]
         """
 
         config = types.GenerateContentConfig(
@@ -165,25 +165,27 @@ class AIService:
             max_output_tokens=2500
         )
 
-        # Safety filter for input
+        # 2. Safely combine prompt and content
         if isinstance(_content_text, list):
             clean_payload = [prompt] + [item for item in _content_text if item is not None]
         else:
             clean_payload = [prompt, _content_text]
 
+        # 3. Call Gemini
         res = self.client.models.generate_content(
             model=model_id,
             config=config,
             contents=clean_payload
         )
 
+        # 4. JSON cleanup
         raw_text = res.text.strip()
         try:
             start = raw_text.find("[")
             end = raw_text.rfind("]") + 1
             return json.loads(raw_text[start:end])
         except Exception as e:
-            raise ValueError(f"Follow-up Quiz Error: {e}")
+            raise ValueError(f"AI Format Error: {e}")
 
     def stream_chat(self, user_question, _content_text, model_id):
         """Streams responses. (No cache needed for streaming)"""
