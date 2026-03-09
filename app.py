@@ -10,10 +10,10 @@ from datetime import datetime
 import json
 import hashlib
 import pandas as pd
-from database_manager import DatabaseManager
+from database_manager import SupabaseManager
 
 # --- 1. INITIALIZATION & CONFIG ---
-db = DatabaseManager()
+db = SupabaseManager()
 st.set_page_config(page_title="AI Study Buddy 2026", layout="wide")
 
 # Custom CSS for Flashcards
@@ -42,9 +42,15 @@ def init_state():
         if key not in st.session_state:
             st.session_state[key] = val
 
-
-
 init_state()
+
+# This ensures that if the page refreshes, we reload the chat history
+if st.session_state.current_doc_id and not st.session_state.chat_history:
+    with st.spinner("Syncing chat history..."):
+        history = db.get_chat_history(st.session_state.current_doc_id)
+        if history:
+            # We assume your DB returns messages in 'created_at' order
+            st.session_state.chat_history = history
 
 # API Client Setup
 if "client" not in st.session_state:
@@ -89,9 +95,7 @@ if page == "🏠 Dashboard":
     col1.metric("Global Accuracy", f"{round(avg_score * 100, 1)}%")
     
     # Fetch total questions from your study_sessions table
-    with db.get_connection() as conn:
-        session_stats = conn.execute("SELECT SUM(questions_answered) FROM study_sessions").fetchone()
-        total_q = session_stats[0] if session_stats[0] else 0
+    total_q = db.get_total_questions_practiced()
     col2.metric("Questions Practiced", total_q)
     
     # Trend Chart
@@ -127,7 +131,7 @@ elif page == "📂 Library":
         file_hash = hashlib.sha256(bytes_data).hexdigest()
         
         # Check the Vault
-        existing_doc = db.get_document(file_name)
+        existing_doc = db.get_document_by_hash(file_hash)
         
         if existing_doc:
             st.success(f"✨ Found '{file_name}' in your library.")
@@ -135,11 +139,11 @@ elif page == "📂 Library":
                 with st.spinner("Retrieving and syncing your study materials..."):
                     st.session_state.last_image_name = file_name
                     st.session_state.study_guide = {
-                        "summary": existing_doc['ai_summary'],
-                        "key_terms": json.loads(existing_doc['ai_flashcards'])
+                        "summary": existing_doc[0]['ai_summary'],
+                        "key_terms": existing_doc[0]['ai_flashcards']
                     }
-                    st.session_state.quiz_data = json.loads(existing_doc['ai_quiz']) if existing_doc['ai_quiz'] else None
-                    st.session_state.current_doc_id = existing_doc['id']
+                    st.session_state.quiz_data = existing_doc[0]['ai_quiz'] if existing_doc[0]['ai_quiz'] else None
+                    st.session_state.current_doc_id = existing_doc[0]['id']
                     # Process images for preview/chat
                     st.session_state.content_to_analyze = process_pdf_to_images(bytes_data) if uploaded_file.type == "application/pdf" else [Image.open(BytesIO(bytes_data))]
                     st.info("Loaded! Go to Study Room.")
@@ -158,8 +162,13 @@ elif page == "📂 Library":
                     
                     st.session_state.study_guide = data
                     st.session_state.last_image_name = file_name
-                    saved_doc = db.get_document(file_name)
-                    st.session_state.current_doc_id = saved_doc['id']
+                    saved_doc = db.get_document_by_hash(file_hash)
+
+                    if saved_doc and isinstance(saved_doc, list) and len(saved_doc) > 0:
+                        st.session_state.current_doc_id = saved_doc[0]['id']
+                    else:
+                        st.error("Document not found in the database.")
+
                     st.success("Analysis Complete!")
 
 # PAGE 3: STUDY ROOM (Summary & Chat)
@@ -270,7 +279,8 @@ elif page == "🧠 Quiz Center":
                             st.warning("⚠️ Please answer all questions!")
                         else:
                             # 1. Calculate Score
-                            score = sum(1 for i, q in enumerate(st.session_state.quiz_data) if current_answers[i] == q["answer"])
+                            score = sum(1 for i, q in enumerate(st.session_state.quiz_data) 
+                                    if str(current_answers[i]).startswith(str(q["answer"])))
                             
                             existing_weaknesses = st.session_state.get("weak_topics", [])
                             new_found_mistakes = []
@@ -314,7 +324,7 @@ elif page == "🧠 Quiz Center":
                 # 2. Iterate through quiz data to show correctness
                 for i, q in enumerate(st.session_state.quiz_data):
                     user_ans = st.session_state.user_answers.get(i)
-                    correct = user_ans == q["answer"]
+                    correct = str(user_ans).startswith(str(q["answer"]))
                     
                     # Use color to indicate success or failure
                     status = "✅ Correct" if correct else "❌ Incorrect"

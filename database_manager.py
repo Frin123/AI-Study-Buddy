@@ -1,255 +1,132 @@
-import sqlite3
-import json
+import streamlit as st
+import requests
 
-class DatabaseManager:
-    def __init__(self, db_name="study_tool.db"):
-        self.db_name = db_name
-        self.init_db()
-
-    def get_connection(self):
-        """Returns a connection that allows accessing columns by name."""
-        conn = sqlite3.connect(self.db_name, timeout=10)
-        conn.row_factory = sqlite3.Row # The magic line
-        return conn
-
-    def init_db(self):
-        """Create database tables if they don't exist."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-
-            # USERS TABLE
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
-            # DOCUMENTS TABLE (Token Saver)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT,
-                file_hash TEXT UNIQUE,
-                raw_text TEXT,
-                ai_summary TEXT,
-                ai_flashcards TEXT,
-                ai_quiz TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
-            # QUIZ HISTORY TABLE
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS quiz_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id INTEGER,
-                score INTEGER,
-                total_questions INTEGER,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (doc_id) REFERENCES documents (id)
-            )
-            """)
-
-            # WRONG QUESTIONS TABLE (for Mistake Inbox)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS wrong_questions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id INTEGER,
-                question TEXT,
-                correct_answer TEXT,
-                user_answer TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (doc_id) REFERENCES documents (id)
-            )
-            """)
-
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS quiz_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id INTEGER,
-                score INTEGER,
-                total_questions INTEGER,
-                mistakes_json TEXT,  -- Stores the questions you got wrong as JSON
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (doc_id) REFERENCES documents (id)
-            )
-            ''')
-
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS study_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id INTEGER,
-                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                end_time TIMESTAMP,
-                questions_answered INTEGER DEFAULT 0,
-                score INTEGER DEFAULT 0,
-                FOREIGN KEY (doc_id) REFERENCES documents (id)
-            )
-            """)
-
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id INTEGER,
-                question TEXT,
-                answer TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (doc_id) REFERENCES documents (id)
-            )
-            """)
-
-            conn.commit()
-
-    # -------------------------------
-    # DOCUMENT MANAGEMENT
-    # -------------------------------
-
-    def save_document(self, filename, file_hash, raw_text, summary=None, flashcards=None, quiz_data=None):
-        """Save or update a document. Automatically handles JSON conversion."""
-        
-        # PRO TWEAK: Convert lists/dicts to strings internally
-        if flashcards and not isinstance(flashcards, str):
-            flashcards = json.dumps(flashcards)
-        if summary and not isinstance(summary, str):
-            summary = json.dumps(summary)
-        if quiz_data and not isinstance(quiz_data, str):
-            quiz_data = json.dumps(quiz_data)
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            INSERT INTO documents (filename, file_hash, raw_text, ai_summary, ai_flashcards, ai_quiz)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(file_hash) DO UPDATE SET
-                filename=excluded.filename,
-                raw_text=excluded.raw_text,
-                ai_summary=excluded.ai_summary,
-                ai_flashcards=excluded.ai_flashcards,
-                ai_quiz=excluded.ai_quiz
-                """, (filename, file_hash, raw_text, summary, flashcards, quiz_data))
-            conn.commit()
-
-    def get_document(self, filename):
-        """Retrieve document by filename."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM documents WHERE filename = ?", (filename,))
-            return cursor.fetchone()
-
-    def get_document_by_id(self, doc_id):
-        """Retrieve document using ID."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
-            return cursor.fetchone()
-
-    # -------------------------------
-    # QUIZ HISTORY & ANALYTICS
-    # -------------------------------
-
-    def save_quiz_result(self, doc_id, score, total_questions):
-        """Save quiz results."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            INSERT INTO quiz_history (doc_id, score, total_questions)
-            VALUES (?, ?, ?)
-            """, (doc_id, score, total_questions))
-            conn.commit()
-
-    def get_average_score(self):
-        """Calculate global average score."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT AVG(score * 1.0 / total_questions) FROM quiz_history")
-            result = cursor.fetchone()
-            return result[0] if result[0] else 0
-
-    def get_score_trend(self):
-        """Get scores over time for charts."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT timestamp, (score * 1.0 / total_questions) * 100
-            FROM quiz_history
-            ORDER BY timestamp
-            """)
-            return cursor.fetchall()
+class SupabaseManager:
+    def __init__(self):
+        self.url = st.secrets["SUPABASE_URL"]
+        self.key = st.secrets["SUPABASE_KEY"]
+        self.headers = {
+            "apikey": self.key,
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        }
     
-    def save_quiz_attempt(self, doc_id, score, total, mistakes):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO quiz_attempts (doc_id, score, total_questions, mistakes_json)
-                VALUES (?, ?, ?, ?)
-            ''', (doc_id, score, total, json.dumps(mistakes)))
-            conn.commit()
+    # Add this right under your __init__ function
+    def _get(self, table, query=""):
+        endpoint = f"{self.url}/rest/v1/{table}{query}"
+        res = requests.get(endpoint, headers=self.headers)
+        return res.json() if res.status_code == 200 else []
 
-    # -------------------------------
-    # WRONG QUESTIONS (Mistake Inbox)
-    # -------------------------------
+    def _post(self, table, data, upsert=False):
+        headers = self.headers.copy()
+        if upsert:
+            headers["Prefer"] = "resolution=merge-duplicates, return=representation"
+        
+        endpoint = f"{self.url}/rest/v1/{table}"
+        res = requests.post(endpoint, headers=headers, json=data)
+        return res.json() if res.status_code in [200, 201] else []
 
-    def save_wrong_question(self, doc_id, question, correct_answer, user_answer):
-        """Save incorrect answers."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            INSERT INTO wrong_questions (doc_id, question, correct_answer, user_answer)
-            VALUES (?, ?, ?, ?)
-            """, (doc_id, question, correct_answer, user_answer))
-            conn.commit()
+    # --- Documents (The Token Saver) ---
+    def save_document(self, filename, file_hash, raw_text, summary=None, flashcards=None, quiz_data=None):
+        data = {
+            "file_name": filename,
+            "content_hash": file_hash,
+            "raw_text": raw_text,
+            "ai_summary": summary,
+            "ai_flashcards": flashcards, # Send as dict/list, no json.dumps!
+            "ai_quiz": quiz_data
+        }
+        # Upsert: Updates if hash exists, otherwise inserts.
+        headers = {**self.headers, "Prefer": "resolution=merge-duplicates, return=representation"}
+        res = requests.post(f"{self.url}/rest/v1/documents", headers=headers, json=data)
+        return res.json()[0] if res.status_code in [200, 201] else None
+
+    def get_document_by_hash(self, file_hash):
+        # Using the helper we defined, which automatically handles status checks
+        res = self._get("documents", f"?content_hash=eq.{file_hash}")
+        return res[0] if res else None
+
+    # --- Quiz Results & Analytics ---
+    def save_quiz_result(self, doc_id, score, total):
+        payload = {"doc_id": doc_id, "score": score, "total_questions": total}
+        requests.post(f"{self.url}/rest/v1/quiz_results", headers=self.headers, json=payload)
+
+    def save_wrong_question(self, doc_id, question, correct, user_ans):
+        payload = {
+            "doc_id": doc_id, 
+            "question": question, 
+            "correct_answer": correct, 
+            "user_answer": user_ans
+        }
+        requests.post(f"{self.url}/rest/v1/wrong_questions", headers=self.headers, json=payload)
 
     def get_wrong_questions(self, doc_id=None):
-        """Retrieve mistakes for Mistake Inbox."""
-        query = "SELECT question, correct_answer, user_answer FROM wrong_questions"
-        params = ()
+        url = f"{self.url}/rest/v1/wrong_questions"
         if doc_id:
-            query += " WHERE doc_id = ?"
-            params = (doc_id,)
-        
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return cursor.fetchall()
-        
-    def save_study_session(self, doc_id, questions_answered, score):
-        """Closes the current session by recording the end time and stats."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            # We assume the session started when they opened the doc
-            # This query finds the most recent 'open' session for this doc and updates it
-            cursor.execute("""
-                INSERT INTO study_sessions (doc_id, questions_answered, score, end_time)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (doc_id, questions_answered, score))
-            conn.commit()
-        
-    def clear_all_history(self):
-        """Wipes all user progress data but keeps the uploaded documents."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM quiz_history")
-            cursor.execute("DELETE FROM quiz_attempts")
-            cursor.execute("DELETE FROM wrong_questions")
-            cursor.execute("DELETE FROM study_sessions")
-            conn.commit()
+            url += f"?doc_id=eq.{doc_id}"
+        res = requests.get(url, headers=self.headers)
+        return res.json()
 
-
-    def save_chat_message(self, doc_id, role, content):
-        with self.get_connection() as conn:
-            conn.execute(
-                "INSERT INTO chat_history (doc_id, question, answer) VALUES (?, ?, ?)",
-                (doc_id, role, content)
-            )
-            conn.commit()
+    # --- Chat History ---
+    def save_chat_message(self, doc_id, question, answer):
+        payload = {"doc_id": doc_id, "question": question, "answer": answer}
+        requests.post(f"{self.url}/rest/v1/chat_messages", headers=self.headers, json=payload)
 
     def get_chat_history(self, doc_id):
-        with self.get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT question, answer FROM chat_history WHERE doc_id = ? ORDER BY timestamp ASC",
-                (doc_id,)
-            )
-            return [dict(row) for row in cursor.fetchall()]
+        res = requests.get(f"{self.url}/rest/v1/chat_messages?doc_id=eq.{doc_id}&order=created_at.asc", headers=self.headers)
+        return res.json()
+    
+    def get_average_score(self):
+        res = self._get("quiz_results")
+        if not res: return 0
+        total = sum((r['score'] / r['total_questions']) for r in res)
+        return total / len(res)
+
+    def get_total_questions_practiced(self):
+        res = self._get("quiz_results")
+        return sum(r['total_questions'] for r in res) if res else 0
+
+    def get_score_trend(self):
+        res = self._get("quiz_results", "?select=created_at,score,total_questions&order=created_at.asc")
+        return [{"Date": r['created_at'], "Score": r['score']/r['total_questions']} for r in res]
+    
+    def save_study_session(self, doc_id, questions_answered, score):
+        # We reuse the quiz_results table to track session stats
+        payload = {
+            "doc_id": doc_id, 
+            "score": score, 
+            "total_questions": questions_answered
+        }
+        # Using the _post helper we created earlier
+        self._post("quiz_results", payload)
+
+    def get_dashboard_stats(self):
+        # One request to get all quiz results
+        res = self._get("quiz_results")
+        if not res:
+            return {"avg": 0, "total": 0, "trend": []}
+    
+        # Do the math in Python (fast!) instead of making more cloud calls
+        total_q = sum(r['total_questions'] for r in res)
+        avg_score = sum(r['score'] / r['total_questions'] for r in res) / len(res)
+    
+        return {"avg": avg_score, "total": total_q, "data": res}
+    
+    @st.cache_data(ttl=600)  # Caches the result for 10 minutes (600 seconds)
+    def get_document_by_hash(_self, file_hash):
+        # We use the internal _get helper you created
+        return _self._get("documents", f"?content_hash=eq.{file_hash}")
+
+    @st.cache_data(ttl=600)
+    def get_dashboard_stats(_self):
+        # This will now only run once every 10 minutes
+        res = _self._get("quiz_results")
+        if not res:
+            return {"avg": 0, "total": 0}
+            
+        total_q = sum(r['total_questions'] for r in res)
+        # Calculate average safely
+        avg_score = sum(r['score'] / r['total_questions'] for r in res) / len(res)
+        
+        return {"avg": avg_score, "total": total_q}
