@@ -52,14 +52,26 @@ class SupabaseManager:
         payload = {"doc_id": doc_id, "score": score, "total_questions": total}
         requests.post(f"{self.url}/rest/v1/quiz_results", headers=self.headers, json=payload)
 
-    def save_wrong_question(self, doc_id, question, correct, user_ans):
+    def save_wrong_question(self, doc_id, question, correct, user_ans, topic):
         payload = {
             "doc_id": doc_id, 
             "question": question, 
             "correct_answer": correct, 
-            "user_answer": user_ans
+            "user_answer": user_ans,
+            "topic": topic
         }
         requests.post(f"{self.url}/rest/v1/wrong_questions", headers=self.headers, json=payload)
+
+    @st.cache_data(ttl=60)
+    def get_top_weak_topics(_self, doc_id):
+        # This fetches all wrong questions for this doc
+        res = _self._get("wrong_questions", f"?doc_id=eq.{doc_id}")
+        if not res: return []
+        
+        # Simple counting logic
+        from collections import Counter
+        topics = [r['topic'] for r in res if r.get('topic')]
+        return Counter(topics).most_common(3) # Returns [('Topic', count), ...]
 
     def get_wrong_questions(self, doc_id=None):
         url = f"{self.url}/rest/v1/wrong_questions"

@@ -7,10 +7,10 @@ from gtts import gTTS
 from io import BytesIO
 import random
 from datetime import datetime
-import json
 import hashlib
 import pandas as pd
 from database_manager import SupabaseManager
+import time
 
 # --- 1. INITIALIZATION & CONFIG ---
 db = SupabaseManager()
@@ -120,6 +120,24 @@ if page == "🏠 Dashboard":
     else:
         st.success("No mistakes tracked yet. Great job!")
 
+    st.divider()
+    st.subheader("🎯 Priority Focus Areas")
+
+    if st.session_state.get("current_doc_id"):
+        # Use the helper to get ONLY the top 3 problem areas
+        weak_topics = db.get_top_weak_topics(st.session_state.current_doc_id)
+    
+        if weak_topics:
+            # Convert the list of tuples [('Topic', 5), ...] to a DataFrame for the chart
+            df_weak = pd.DataFrame(weak_topics, columns=['Topic', 'Errors'])
+            
+            # Show the Bar Chart
+            st.bar_chart(df_weak.set_index('Topic'))
+            
+            st.info("💡 These are your top 3 struggle areas. Use 'Adaptive Quiz' to master them.")
+        else:
+            st.success("No 'Danger Zones' detected yet. Your understanding looks solid!")
+
 # PAGE 2: LIBRARY (The "Vault" Logic)
 elif page == "📂 Library":
     st.title("📂 Document Library")
@@ -144,32 +162,77 @@ elif page == "📂 Library":
                     }
                     st.session_state.quiz_data = existing_doc[0]['ai_quiz'] if existing_doc[0]['ai_quiz'] else None
                     st.session_state.current_doc_id = existing_doc[0]['id']
+                    st.session_state.chat_history = [] 
+        
+                    # Load the new history immediately
+                    history = db.get_chat_history(st.session_state.current_doc_id)
+                    if history:
+                        st.session_state.chat_history = history
                     # Process images for preview/chat
                     st.session_state.content_to_analyze = process_pdf_to_images(bytes_data) if uploaded_file.type == "application/pdf" else [Image.open(BytesIO(bytes_data))]
                     st.info("Loaded! Go to Study Room.")
         else:
             if st.button("Analyze New Document"):
                 with st.spinner("🤖 Gemini is reading your notes..."):
-                    # Process images
+                    # 1. Process and Analyze
                     imgs = process_pdf_to_images(bytes_data) if uploaded_file.type == "application/pdf" else [Image.open(BytesIO(bytes_data))]
-                    st.session_state.content_to_analyze = imgs
-                    
-                    # Generate Initial Guide
                     data = ai_service.generate_study_guide(imgs)
-                    
-                    # Save to DB
-                    db.save_document(file_name, file_hash, "", data['summary'], data['key_terms'], None)
-                    
-                    st.session_state.study_guide = data
-                    st.session_state.last_image_name = file_name
-                    saved_doc = db.get_document_by_hash(file_hash)
-
-                    if saved_doc and isinstance(saved_doc, list) and len(saved_doc) > 0:
-                        st.session_state.current_doc_id = saved_doc[0]['id']
+        
+                    # 2. IDK Protocol Check
+                    if data.get("error") == "ILLEGIBLE":
+                        st.error(f"⚠️ AI Clarity Issue: {data.get('reason')}")
                     else:
-                        st.error("Document not found in the database.")
+                        # 3. Save to DB
+                        db.save_document(file_name, file_hash, "", data['summary'], data['key_terms'], None)
+            
+                        # 4. Set State IMMEDIATELY (Don't wait for DB fetch to show success)
+                        st.session_state.study_guide = data
+                        st.session_state.last_image_name = file_name
+                        st.session_state.content_to_analyze = imgs
+                        st.session_state.chat_history = []
+            
+                        # 5. Silent Background Fetch for the ID
+                        time.sleep(1) # Give it a full second for the "Ghost" to vanish
+                        saved_doc = db.get_document_by_hash(file_hash)
+            
+                        if saved_doc and len(saved_doc) > 0:
+                            st.session_state.current_doc_id = saved_doc[0]['id']
+            
+                        # 6. Success Message is now independent of the fetch result
+                        st.success("Analysis Complete! Document is now in your Library.")
+    
+    st.divider()
+    with st.expander("⌨️ Manual Paste (Backup)"):
+        pasted_text = st.text_area("Paste your study notes here:")
+        doc_title = st.text_input("Note Title (e.g., Geometry Basics)")
+        
+        if st.button("Analyze Text"):
+            if pasted_text and doc_title:
+                with st.spinner("Analyzing text..."):
+                    # 1. Use the upgraded main function (it handles text strings perfectly)
+                    data = ai_service.generate_study_guide(pasted_text)
+            
+                    # Check for the IDK Protocol error
+                    if data.get("error"):
+                        st.error(f"AI Issue: {data.get('reason')}")
+                    else:
+                        # 2. Save to DB
+                        file_hash = hashlib.sha256(pasted_text.encode()).hexdigest()
+                        db.save_document(doc_title, file_hash, pasted_text, data['summary'], data['key_terms'], None)
+                
+                        # Fetch the ID immediately to keep state in sync
+                        saved_doc = db.get_document_by_hash(file_hash)
+                        if saved_doc:
+                            st.session_state.current_doc_id = saved_doc[0]['id']
+                
+                        # 3. Update state
+                        st.session_state.study_guide = data
+                        st.session_state.last_image_name = doc_title
+                        st.session_state.chat_history = [] # Clear chat for new doc!
+                        st.success("Manual notes processed! Ready in Study Room.")
+            else:
+                st.warning("Please provide both a title and some text content.")
 
-                    st.success("Analysis Complete!")
 
 # PAGE 3: STUDY ROOM (Summary & Chat)
 elif page == "📖 Study Room":
@@ -287,16 +350,17 @@ elif page == "🧠 Quiz Center":
                             # --- STEP 2: TRACK WEAKNESSES ---
                             for i, q in enumerate(st.session_state.quiz_data):
                                 if current_answers[i] != q["answer"]:
-                                    # Record the topic for the next "Adaptive" generation
-                                    if 'topic' in q:
-                                        new_found_mistakes.append(q["topic"])
-                                    
-                                    # Record the mistake in the DB for the "Mistake Inbox"
+                                # Capture the topic from the AI's JSON
+                                    topic_name = q.get('topic', 'General Concepts')
+                                    new_found_mistakes.append(topic_name)
+        
+                                # Save to DB with the topic included
                                     db.save_wrong_question(
                                         st.session_state.current_doc_id, 
                                         q['question'], 
                                         q['answer'], 
-                                        current_answers[i]
+                                        current_answers[i],
+                                        topic_name # Pass it here!
                                     )
                             
                             # Update session state with unique topics

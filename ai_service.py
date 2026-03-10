@@ -5,7 +5,6 @@ import PyPDF2
 from io import BytesIO
 
 
-
 class AIService:
     def __init__(self, client, language="English"):
         self.client = client
@@ -16,6 +15,10 @@ class AIService:
         When asked to summarize or answer based on the whole document, 
         be structured and concise. Use bullet points. 
         If the content is too long, focus on the most important academic points first.
+
+        "TOPIC SPECIFICITY RULE: You are forbidden from using generic topics like 'General Concept', 'Notes', or 'Study Material'.
+          You must categorize questions based on the actual academic sub-topic (e.g., 'Algebraic Geometry', 'Cellular Respiration', 'Macroeconomics'). 
+          If the material is Math, use the specific mathematical operation as the topic."
         """
 
     @st.cache_data
@@ -39,43 +42,62 @@ class AIService:
             return "gemini-3.1-flash-lite-preview" 
         return user_choice
 
-    def generate_study_guide(_self, _content_text):
+    def generate_study_guide(self, _content_text):
         """
-        Analyzes text and returns structured JSON.
-        Cached to make flashcard toggling instant.
+        Analyzes text/images and returns structured JSON.
+        Includes IDK Protocol and Topic Tagging.
         """
-
         if not _content_text:
             raise ValueError("No content was provided for analysis.")
-        
+    
+        # 1. UPDATED SCHEMA (Adding error handling and topic tagging)
         model_config = types.GenerateContentConfig(
-            system_instruction=_self.sys_instr,
+            system_instruction=self.sys_instr + """
+            IDK PROTOCOL: If the input is blurry or not study material, 
+            set 'error' to 'ILLEGIBLE' and 'reason' to a brief explanation.
+            Otherwise, ensure every Key Term has a 'topic' associated with it.
+            """,
             response_mime_type='application/json',
             response_schema={'type': 'object', 'required': ['summary','key_terms'],'properties': {
                 'summary': {'type': 'string'},
-                'key_terms': {'type': 'array', 'items': {'type': 'object', 'properties': {'term': {'type': 'string'}, 'definition': {'type': 'string'}}}},
-                'quiz_questions': {'type': 'array', 'items': {'type': 'string'}}
+                'error': {'type': 'string'}, # For IDK Protocol
+                'reason': {'type': 'string'}, # For IDK Protocol
+                'key_terms': {
+                    'type': 'array', 
+                    'items': {
+                        'type': 'object', 
+                        'properties': {
+                            'term': {'type': 'string'}, 
+                            'definition': {'type': 'string'},
+                            'topic': {'type': 'string'} # For Priority Tracking
+                        }
+                    }
+                }
             }},
             max_output_tokens=4000,
             temperature=0.1
         )
-        
-        prompt = "Analyze the provided material. Return a DENSE summary and exactly 10-15 key terms."
+    
+        # 2. THE PROMPT
+        prompt = "Analyze the provided material. Return a DENSE summary and exactly 10-15 key terms with topics."
 
-        # Ensure we are not sending [prompt, None]
-        # We filter out any None values just in case
         if not isinstance(_content_text, list):
             _content_text = [_content_text]
+    
         clean_contents = [prompt] + [item for item in _content_text if item is not None]
-        
-        res = _self.client.models.generate_content(
-            model=_self.get_model("auto"),
+    
+        res = self.client.models.generate_content(
+            model=self.get_model("auto"),
             config=model_config,
             contents=clean_contents
         )
 
         try:
-            return json.loads(res.text)
+            data = json.loads(res.text)
+            # IDK Protocol Check
+            if data.get("error") == "ILLEGIBLE":
+                return data # Let the UI handle the error display
+            return data
         except Exception as e:
             raise ValueError("JSON Error: Study guide too complex. Try a smaller section.")
 
@@ -93,9 +115,13 @@ class AIService:
                     "question": {"type": "string"},
                     "options": {"type": "array", "items": {"type": "string"}},
                     "answer": {"type": "string"},
-                    "explanation": {"type": "string"}
+                    "explanation": {"type": "string"},
+                    "topic": {
+                        "type": "string", 
+                        "description": "Specific academic sub-topic only. DO NOT use 'General'."
+                    }
                 },
-                "required": ["question", "options", "answer", "explanation"]
+                "required": ["question", "options", "answer", "explanation", "topic"]
             }
         }
 
@@ -116,7 +142,9 @@ class AIService:
         - The correct answer must match one of the options exactly.
         - Include a short explanation for the correct answer.
         - Ensure all strings are JSON-safe. 
-        - If you use quotes inside a sentence, use single quotes (') or escape them (\").  
+        - If you use quotes inside a sentence, use single quotes (') or escape them (\").
+        - EVERY question must be tagged with a specific academic topic (e.g., 'Linear Transformations', 'Cell Mitosis').
+        - DO NOT use generic topics like 'General' or 'Study Notes'.  
 
         Seed reference: {_seed}
         """
