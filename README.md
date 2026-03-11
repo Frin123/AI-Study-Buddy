@@ -43,6 +43,9 @@ flowchart TD
     Gemini -->|Output: Summary/Quiz| UI
     DB -->|History/User Data| UI
 
+
+
+
 ## 💻 Local Setup
 If you would like to run or develop this project locally:
 
