@@ -24,12 +24,8 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 
 ## Architecture Diagram
 
-flowchart TD
-    User -->|Interaction| UI[Streamlit UI]
-    UI -->|API Requests| Gemini[Gemini API]
-    UI -->|Data| DB[(Supabase DB)]
-    Gemini -->|Returns Data| UI
-    DB -->|Fetches/Saves| UI
+![Architecture Diagram](C:\Users\USER\ai-study-buddy\User Authentication Flow to-2026-03-11-085945.png)
+
 ## 💻 Local Setup
 If you would like to run or develop this project locally:
 
