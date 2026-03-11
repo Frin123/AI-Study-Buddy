@@ -144,3 +144,18 @@ class SupabaseManager:
     
         return {"avg": avg_score, "total": total_q, "data": res}
     
+    def get_user_recent_document(self, user_id):
+        """Fetches the most recently active document for a specific user."""
+        try:
+            response = self.supabase.table("documents")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .order("created_at", descending=True)\
+                .limit(1)\
+                .execute()
+        
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"Error fetching recent doc: {e}")
+            return None
+    

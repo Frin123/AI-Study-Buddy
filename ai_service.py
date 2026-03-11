@@ -227,3 +227,11 @@ class AIService:
             config=qa_config,
             contents=[user_question] + _content_text
         )
+    
+@st.cache_resource
+def get_ai_service(_client, lang):
+    """
+    Caches the AIService instance so we don't recreate it on every rerun.
+    The underscore in _client tells Streamlit not to hash the client object itself.
+    """
+    return AIService(_client, language=lang)
