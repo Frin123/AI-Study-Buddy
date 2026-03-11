@@ -23,7 +23,7 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 * **Processing:** PyPDF2, gTTS (Google Text-to-Speech), and Pandas
 
 ## Architecture Diagram
-
+```mermaid
 flowchart TD
     %% Presentation Tier
     User((Student)) -->|Interaction| UI[Streamlit Frontend]
