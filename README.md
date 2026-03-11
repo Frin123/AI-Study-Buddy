@@ -24,7 +24,7 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 
 ## Architecture Diagram
 
-![Architecture Diagram](C:\Users\USER\ai-study-buddy\User Authentication Flow to-2026-03-11-085945.png)
+![Architecture Diagram](https://mermaid.ai/d/02977498-c278-48dc-a4bc-72eeac9846a3)
 
 ## 💻 Local Setup
 If you would like to run or develop this project locally:
