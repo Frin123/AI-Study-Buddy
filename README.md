@@ -25,16 +25,41 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 ## Architecture Diagram
 ```mermaid
 flowchart TD
-    A[User] -->|Login| B{Auth Status}
-    B -->|Guest| C[Login View]
-    C -->|Enter ID| D[Fetch Recent Doc]
-    D --> E[Dashboard]
-    B -->|Authenticated| E
-    E --> F[Library: Upload PDF]
-    F --> G[(Supabase DB)]
-    E --> H[Study Room: AI Summary]
-    E --> I[Quiz Center: Track Mistakes]
-    I --> G
+    %% ========================
+    %% Frontend: Presentation Layer
+    %% ========================
+    subgraph Frontend [Presentation Layer - Streamlit]
+        A([User Login]):::frontend --> B{{Auth?}}:::frontend
+        B -->|Guest| C([View Doc]):::frontend
+        B -->|User| D([Dashboard]):::frontend
+        C --> E([Upload PDF]):::frontend
+        D --> E
+        E --> F([Study Room / AI Chat]):::frontend
+        E --> G([Quiz Center]):::frontend
+    end
+
+    %% ========================
+    %% Backend: Application & Data Layer
+    %% ========================
+    subgraph Backend [Application & Data Layer]
+        H([Google Gemini API]):::backend
+        I[(Supabase Database)]:::backend
+    end
+
+    %% ========================
+    %% Connections
+    %% ========================
+    F -->|Contextual Prompt| H
+    G -->|Result Tracking| I
+    E -->|Store Document| I
+    H -->|Analysis / Quiz Gen| F
+
+    %% ========================
+    %% Styling
+    %% ========================
+    classDef frontend fill:#E3F2FD,stroke:#2196F3,stroke-width:2px,color:#0D47A1;
+    classDef backend fill:#FFF3E0,stroke:#FB8C00,stroke-width:2px,color:#E65100;
+    classDef external fill:#F1F8E9,stroke:#8BC34A,stroke-width:2px,color:#33691E;
 ```
 
 
