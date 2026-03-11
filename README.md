@@ -24,15 +24,12 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 
 ## Architecture Diagram
 
-User
-  │
-Streamlit UI
-  │
-Gemini API ─── Supabase
-  │             │
-Study Guides    Database
-Chat Tutor      Quiz Data
-Analytics
+flowchart TD
+    User -->|Interaction| UI[Streamlit UI]
+    UI -->|API Requests| Gemini[Gemini API]
+    UI -->|Data| DB[(Supabase DB)]
+    Gemini -->|Returns Data| UI
+    DB -->|Fetches/Saves| UI
 ## 💻 Local Setup
 If you would like to run or develop this project locally:
 
