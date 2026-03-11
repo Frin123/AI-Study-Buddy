@@ -42,7 +42,7 @@ flowchart TD
     %% Flow Details
     Gemini -->|Output: Summary/Quiz| UI
     DB -->|History/User Data| UI
-
+```
 
 
 
