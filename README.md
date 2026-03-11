@@ -24,7 +24,24 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 
 ## Architecture Diagram
 
-![Architecture Diagram](https://mermaid.ai/d/02977498-c278-48dc-a4bc-72eeac9846a3)
+flowchart TD
+    %% Presentation Tier
+    User((Student)) -->|Interaction| UI[Streamlit Frontend]
+
+    %% Application Tier
+    subgraph "Application Engine"
+        UI -->|Analysis Request| Gemini[Google Gemini AI]
+        UI -->|Session Mgmt| State[Session State]
+    end
+
+    %% Data Tier
+    subgraph "Persistence Layer"
+        UI -->|Read/Write Data| DB[(Supabase PostgreSQL)]
+    end
+
+    %% Flow Details
+    Gemini -->|Output: Summary/Quiz| UI
+    DB -->|History/User Data| UI
 
 ## 💻 Local Setup
 If you would like to run or develop this project locally:
