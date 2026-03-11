@@ -25,23 +25,16 @@ Access the application here: [Insert Your Streamlit Cloud Link Here]
 ## Architecture Diagram
 ```mermaid
 flowchart TD
-    %% Presentation Tier
-    User((Student)) -->|Interaction| UI[Streamlit Frontend]
-
-    %% Application Tier
-    subgraph "Application Engine"
-        UI -->|Analysis Request| Gemini[Google Gemini AI]
-        UI -->|Session Mgmt| State[Session State]
-    end
-
-    %% Data Tier
-    subgraph "Persistence Layer"
-        UI -->|Read/Write Data| DB[(Supabase PostgreSQL)]
-    end
-
-    %% Flow Details
-    Gemini -->|Output: Summary/Quiz| UI
-    DB -->|History/User Data| UI
+    A[User] -->|Login| B{Auth Status}
+    B -->|Guest| C[Login View]
+    C -->|Enter ID| D[Fetch Recent Doc]
+    D --> E[Dashboard]
+    B -->|Authenticated| E
+    E --> F[Library: Upload PDF]
+    F --> G[(Supabase DB)]
+    E --> H[Study Room: AI Summary]
+    E --> I[Quiz Center: Track Mistakes]
+    I --> G
 ```
 
 
